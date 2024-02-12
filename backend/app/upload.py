@@ -20,7 +20,7 @@ from langchain_core.runnables import (
     RunnableSerializable,
 )
 from langchain_core.vectorstores import VectorStore
-from langchain_openai import OpenAIEmbeddings
+from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
 
 from app.ingest import ingest_blob
 from app.parsing import MIMETYPE_BASED_PARSER
@@ -108,11 +108,10 @@ index_schema = {
 }
 
 if os.environ["OPENAI_API_TYPE"] == "azure":
-    embeddings = OpenAIEmbeddings(
-        deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME_EB"],
-        model=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME_EB"],
-        openai_api_base=os.environ["AZURE_OPENAI_API_BASE"],
-        openai_api_type="azure",
+    embeddings = AzureOpenAIEmbeddings(
+        azure_endpoint=os.environ["AZURE_OPENAI_API_BASE"],
+        azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME_EB"],
+        openai_api_version=os.environ["AZURE_OPENAI_API_VERSION"],
     )
 else:
     embeddings = OpenAIEmbeddings()

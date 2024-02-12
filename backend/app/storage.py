@@ -1,16 +1,16 @@
-import os
 from datetime import datetime
 from typing import List, Sequence
 
 import orjson
-from agent_executor.checkpoint import RedisCheckpoint
 from langchain.schema.messages import AnyMessage
-from langchain.utilities.redis import get_client
-from permchain.channels import Topic
-from permchain.channels.base import ChannelsManager, create_checkpoint
-from redis.client import Redis as RedisType
+from langgraph.channels.base import ChannelsManager
+from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.pregel import _prepare_next_tasks
 
+from app.agent import AgentType, get_agent_executor
+from app.redis import get_redis_client
 from app.schema import Assistant, AssistantWithoutUserId, Thread, ThreadWithoutUserId
+from app.stream import map_chunk_to_msg
 
 
 def assistants_list_key(user_id: str) -> str:
@@ -42,17 +42,9 @@ def load(keys: list[str], values: list[bytes]) -> dict:
     return {k: orjson.loads(v) if v is not None else None for k, v in zip(keys, values)}
 
 
-def _get_redis_client() -> RedisType:
-    """Get a Redis client."""
-    url = os.environ.get("REDIS_URL")
-    if not url:
-        raise ValueError("REDIS_URL not set")
-    return get_client(url)
-
-
 def list_assistants(user_id: str) -> List[Assistant]:
     """List all assistants for the current user."""
-    client = _get_redis_client()
+    client = get_redis_client()
     ids = [orjson.loads(id) for id in client.smembers(assistants_list_key(user_id))]
     with client.pipeline() as pipe:
         for id in ids:
@@ -63,18 +55,18 @@ def list_assistants(user_id: str) -> List[Assistant]:
 
 def get_assistant(user_id: str, assistant_id: str) -> Assistant | None:
     """Get an assistant by ID."""
-    client = _get_redis_client()
+    client = get_redis_client()
     values = client.hmget(assistant_key(user_id, assistant_id), *assistant_hash_keys)
     return load(assistant_hash_keys, values) if any(values) else None
 
 
 def list_public_assistants(
-    assistant_ids: Sequence[str]
+    assistant_ids: Sequence[str],
 ) -> List[AssistantWithoutUserId]:
     """List all the public assistants."""
     if not assistant_ids:
         return []
-    client = _get_redis_client()
+    client = get_redis_client()
     ids = [
         id
         for id, is_public in zip(
@@ -116,7 +108,7 @@ def put_assistant(
         "updated_at": datetime.utcnow(),
         "public": public,
     }
-    client = _get_redis_client()
+    client = get_redis_client()
     with client.pipeline() as pipe:
         pipe.sadd(assistants_list_key(user_id), orjson.dumps(assistant_id))
         pipe.hset(assistant_key(user_id, assistant_id), mapping=_dump(saved))
@@ -129,7 +121,7 @@ def put_assistant(
 
 def list_threads(user_id: str) -> List[ThreadWithoutUserId]:
     """List all threads for the current user."""
-    client = _get_redis_client()
+    client = get_redis_client()
     ids = [orjson.loads(id) for id in client.smembers(threads_list_key(user_id))]
     with client.pipeline() as pipe:
         for id in ids:
@@ -140,40 +132,40 @@ def list_threads(user_id: str) -> List[ThreadWithoutUserId]:
 
 def get_thread(user_id: str, thread_id: str) -> Thread | None:
     """Get a thread by ID."""
-    client = _get_redis_client()
+    client = get_redis_client()
     values = client.hmget(thread_key(user_id, thread_id), *thread_hash_keys)
     return load(thread_hash_keys, values) if any(values) else None
 
 
+# TODO remove hardcoded channel name
+MESSAGES_CHANNEL_NAME = "__root__"
+
+
 def get_thread_messages(user_id: str, thread_id: str):
     """Get all messages for a thread."""
-    client = RedisCheckpoint()
-    checkpoint = client.get(
-        {"configurable": {"user_id": user_id, "thread_id": thread_id}}
-    )
-    # TODO replace hardcoded messages channel with
-    # channel extracted from agent
-    with ChannelsManager(
-        {"messages": Topic(AnyMessage, accumulate=True)}, checkpoint
-    ) as channels:
-        return {k: v.get() for k, v in channels.items()}
+    config = {"configurable": {"user_id": user_id, "thread_id": thread_id}}
+    app = get_agent_executor([], AgentType.GPT_35_TURBO, "", False)
+    checkpoint = app.checkpointer.get(config) or empty_checkpoint()
+    with ChannelsManager(app.channels, checkpoint) as channels:
+        return {
+            "messages": [
+                map_chunk_to_msg(msg) for msg in channels[MESSAGES_CHANNEL_NAME].get()
+            ],
+            "resumeable": bool(_prepare_next_tasks(checkpoint, app.nodes, channels)),
+        }
 
 
 def post_thread_messages(user_id: str, thread_id: str, messages: Sequence[AnyMessage]):
     """Add messages to a thread."""
-    client = RedisCheckpoint()
     config = {"configurable": {"user_id": user_id, "thread_id": thread_id}}
-    checkpoint = client.get(config)
-    # TODO replace hardcoded messages channel with
-    # channel extracted from agent
-    with ChannelsManager(
-        {"messages": Topic(AnyMessage, accumulate=True)}, checkpoint
-    ) as channels:
-        channels["messages"].update(messages)
-        checkpoint = {
-            k: v for k, v in create_checkpoint(channels).items() if k == "messages"
-        }
-        client.put(config, checkpoint)
+    app = get_agent_executor([], AgentType.GPT_35_TURBO, "", False)
+    checkpoint = app.checkpointer.get(config) or empty_checkpoint()
+    with ChannelsManager(app.channels, checkpoint) as channels:
+        channel = channels[MESSAGES_CHANNEL_NAME]
+        channel.update([messages])
+        checkpoint["channel_values"][MESSAGES_CHANNEL_NAME] = channel.checkpoint()
+        checkpoint["channel_versions"][MESSAGES_CHANNEL_NAME] += 1
+        app.checkpointer.put(config, checkpoint)
 
 
 def put_thread(user_id: str, thread_id: str, *, assistant_id: str, name: str) -> Thread:
@@ -185,7 +177,7 @@ def put_thread(user_id: str, thread_id: str, *, assistant_id: str, name: str) ->
         "name": name,
         "updated_at": datetime.utcnow(),
     }
-    client = _get_redis_client()
+    client = get_redis_client()
     with client.pipeline() as pipe:
         pipe.sadd(threads_list_key(user_id), orjson.dumps(thread_id))
         pipe.hset(thread_key(user_id, thread_id), mapping=_dump(saved))

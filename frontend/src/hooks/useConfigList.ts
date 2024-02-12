@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useState } from "react";
 import orderBy from "lodash/orderBy";
+import { v4 as uuidv4 } from "uuid";
 
 export interface Config {
   assistant_id: string;
@@ -7,6 +8,7 @@ export interface Config {
   updated_at: string;
   config: {
     configurable?: {
+      tools?: string[];
       [key: string]: unknown;
     };
   };
@@ -75,13 +77,18 @@ export function useConfigList(): ConfigListProps {
     fetchConfigs();
   }, []);
 
+  const enterConfig = useCallback((key: string | null) => {
+    setCurrent(key);
+    window.scrollTo({ top: 0 });
+  }, []);
+
   const saveConfig = useCallback(
     async (
       name: string,
       config: Config["config"],
       files: File[],
       isPublic: boolean,
-      assistant_id: string = crypto.randomUUID()
+      assistant_id: string = uuidv4()
     ) => {
       const formData = files.reduce((formData, file) => {
         formData.append("files", file);
@@ -108,14 +115,10 @@ export function useConfigList(): ConfigListProps {
           : Promise.resolve(),
       ]);
       setConfigs({ ...saved, mine: true });
-      setCurrent(saved.assistant_id);
+      enterConfig(saved.assistant_id);
     },
-    []
+    [enterConfig]
   );
-
-  const enterConfig = useCallback((key: string | null) => {
-    setCurrent(key);
-  }, []);
 
   return {
     configs,

@@ -12,7 +12,7 @@ export interface StreamState {
 export interface StreamStateProps {
   stream: StreamState | null;
   startStream: (
-    input: { messages: Message[] },
+    input: Message[] | null,
     assistant_id: string,
     thread_id: string
   ) => Promise<void>;
@@ -25,22 +25,23 @@ export function useStreamState(): StreamStateProps {
 
   const startStream = useCallback(
     async (
-      input: { messages: Message[] },
+      input: Message[] | null,
       assistant_id: string,
       thread_id: string
     ) => {
       const controller = new AbortController();
       setController(controller);
-      setCurrent({ status: "inflight", messages: input.messages, merge: true });
+      setCurrent({ status: "inflight", messages: input || [], merge: true });
 
       await fetchEventSource("/runs/stream", {
         signal: controller.signal,
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ input, assistant_id, thread_id }),
+        openWhenHidden: true,
         onmessage(msg) {
           if (msg.event === "data") {
-            const { messages } = JSON.parse(msg.data);
+            const messages = JSON.parse(msg.data);
             setCurrent((current) => ({
               status: "inflight",
               messages,
@@ -52,6 +53,7 @@ export function useStreamState(): StreamStateProps {
               status: "inflight",
               messages: current?.messages,
               run_id: run_id,
+              merge: current?.merge,
             }));
           } else if (msg.event === "error") {
             setCurrent((current) => ({
@@ -90,7 +92,17 @@ export function useStreamState(): StreamStateProps {
       controller?.abort();
       setController(null);
       if (clear) {
-        setCurrent(null);
+        setCurrent((current) => ({
+          status: "done",
+          run_id: current?.run_id,
+        }));
+      } else {
+        setCurrent((current) => ({
+          status: "done",
+          messages: current?.messages,
+          run_id: current?.run_id,
+          merge: false,
+        }));
       }
     },
     [controller]

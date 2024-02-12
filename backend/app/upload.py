@@ -106,10 +106,21 @@ class IngestRunnable(RunnableSerializable[BinaryIO, List[str]]):
 index_schema = {
     "tag": [{"name": "namespace"}],
 }
+
+if os.environ["OPENAI_API_TYPE"] == "azure":
+    embeddings = OpenAIEmbeddings(
+        deployment=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME_EB"],
+        model=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME_EB"],
+        openai_api_base=os.environ["AZURE_OPENAI_API_BASE"],
+        openai_api_type="azure",
+    )
+else:
+    embeddings = OpenAIEmbeddings()
+
 vstore = Redis(
     redis_url=os.environ["REDIS_URL"],
     index_name="opengpts",
-    embedding=OpenAIEmbeddings(),
+    embedding=embeddings,
     index_schema=index_schema,
 )
 
